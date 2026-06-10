@@ -115,24 +115,7 @@ If `CAL_API_KEY` is missing, the app uses `MockCalClient` so the UI and tests st
 
 ## LLM Configuration
 
-The submitted app is intended to run with an LLM:
-
-```bash
-LLM_PROVIDER=openai
-OPENAI_API_KEY=your_openai_key
-OPENAI_MODEL=gpt-4o-mini
-```
-
-Other OpenAI-compatible providers can be used by changing the base URL and model:
-
-```bash
-LLM_PROVIDER=openai
-OPENAI_BASE_URL=https://openrouter.ai/api/v1
-OPENAI_API_KEY=your_provider_key
-OPENAI_MODEL=openai/gpt-4o-mini
-```
-
-OpenRouter can also be configured directly:
+The submitted app is intended to run with an LLM. The configuration used for final testing is OpenRouter with NVIDIA's OpenAI-compatible model:
 
 ```bash
 LLM_PROVIDER=openrouter
@@ -140,23 +123,27 @@ OPENROUTER_API_KEY=your_openrouter_key
 OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
 ```
 
+Successful chat responses should include:
+
+```json
+{"extractor": "openrouter"}
+```
+
+OpenAI is also supported through the same OpenAI-compatible extraction client:
+
+```bash
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your_openai_key
+OPENAI_MODEL=gpt-4o-mini
+```
+
+The OpenAI configuration is code-supported but was not the final manually verified path because final testing was done with OpenRouter/NVIDIA credentials.
+
 The LLM is responsible for understanding the user's conversational request and extracting a structured scheduling action. Booking creation, cancellation, rescheduling, and API error handling remain deterministic backend logic.
 
 `LLM_PROVIDER=rule_based` exists only as a deterministic test mode. It is not the intended production or submission configuration. In `LLM_PROVIDER=openai` or `LLM_PROVIDER=openrouter` mode, LLM extraction failures return an error instead of silently falling back to rule-based parsing.
 
 The assistant also keeps a short in-memory conversation history per `conversation_id`, so follow-up messages like an attendee email can complete a booking request from the previous turn.
-
-Successful chat responses include an `extractor` field. For the submitted configuration, it should be:
-
-```json
-{"extractor": "openai"}
-```
-
-For OpenRouter mode, it should be:
-
-```json
-{"extractor": "openrouter"}
-```
 
 ## Conflict Handling and Follow-up Memory
 
