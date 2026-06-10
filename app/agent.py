@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 from app.cal_client import CalGateway
@@ -84,6 +84,17 @@ class SchedulingAssistant:
             self._remember(request.conversation_id, request.message, response)
             return response
         except CalApiError as exc:
+            if action.intent == Intent.BOOK and is_availability_error(exc):
+                conflict_response = self._booking_conflict_response(
+                    action,
+                    request.conversation_id,
+                    timezone,
+                    extractor_name,
+                )
+                if conflict_response:
+                    self.memory.set(request.conversation_id, action)
+                    self._remember(request.conversation_id, request.message, conflict_response)
+                    return conflict_response
             response = ChatResponse(
                 status="error",
                 reply=f"Cal.com API error: {exc}. Details: {exc.payload}",
@@ -240,6 +251,35 @@ class SchedulingAssistant:
             missing = ["booking_match_many"]
         return action.model_copy(update={"date_from": date_from, "date_to": date_to, "missing_fields": missing})
 
+    def _booking_conflict_response(
+        self,
+        action: AssistantAction,
+        conversation_id: str,
+        timezone: str,
+        extractor_name: str,
+    ) -> ChatResponse | None:
+        if not action.start:
+            return None
+        duration = action.duration_minutes or 30
+        requested_start = ensure_aware(action.start, timezone)
+        requested_end = requested_start + timedelta(minutes=duration)
+        bookings = self.cal.list_bookings(status="upcoming")
+        conflicts = overlapping_bookings(bookings, requested_start, requested_end, timezone)
+        suggestions = suggest_slots(bookings, requested_start, duration, timezone)
+        if conflicts:
+            reply = format_conflict_reply(requested_start, requested_end, conflicts, suggestions, timezone)
+        else:
+            reply = format_unavailable_reply(requested_start, requested_end, suggestions, timezone)
+        return ChatResponse(
+            status="needs_clarification",
+            reply=reply,
+            conversation_id=conversation_id,
+            action=action.intent.value,
+            extractor=extractor_name,
+            bookings=conflicts,
+            missing_fields=["start"],
+        )
+
     def _missing_fields(self, action: AssistantAction) -> list[str]:
         missing = normalize_missing_fields(action.intent, action.missing_fields)
         if action.intent == Intent.BOOK:
@@ -312,10 +352,16 @@ class SchedulingAssistant:
 
 def merge_pending(pending: AssistantAction, new: AssistantAction, message: str) -> AssistantAction:
     data = pending.model_dump()
+    if pending.intent == Intent.BOOK and looks_like_time_selection(message):
+        data["start"] = new.start or data.get("start")
+        data["missing_fields"] = []
+        return AssistantAction(**data)
     if pending.intent == Intent.CLARIFY and new.intent != Intent.CLARIFY:
         data["intent"] = new.intent
     for key, value in new.model_dump().items():
         if key in {"intent", "missing_fields"}:
+            continue
+        if pending.intent == Intent.BOOK and new.intent == Intent.CLARIFY and key not in {"start", "date_from", "date_to"}:
             continue
         if value not in (None, [], ""):
             data[key] = value
@@ -325,6 +371,15 @@ def merge_pending(pending: AssistantAction, new: AssistantAction, message: str) 
         data["attendee_name"] = message.strip()
     data["missing_fields"] = []
     return AssistantAction(**data)
+
+
+def looks_like_time_selection(message: str) -> bool:
+    lowered = message.lower()
+    return bool(
+        re.search(r"\b(take|this one|use|choose|pick|works|ok|okay)\b", lowered)
+        or re.search(r"\d{1,2}:\d{2}\s*(am|pm)", lowered)
+        or re.search(r"\d{1,2}\s*(am|pm)", lowered)
+    )
 
 
 def apply_booking_defaults(action: AssistantAction, settings: Settings) -> AssistantAction:
@@ -477,6 +532,89 @@ def normalize_missing_fields(intent: Intent, missing_fields: list[str]) -> list[
         Intent.CLARIFY: set(missing_fields),
     }
     return [field for field in missing_fields if field in allowed[intent]]
+
+
+def overlapping_bookings(bookings: list, start: datetime, end: datetime, timezone: str) -> list:
+    conflicts = []
+    for booking in bookings:
+        if not booking.start:
+            continue
+        booking_start = ensure_aware(booking.start, timezone)
+        if booking.end:
+            booking_end = ensure_aware(booking.end, timezone)
+        else:
+            booking_end = booking_start + timedelta(minutes=booking.duration or 30)
+        if start < booking_end and end > booking_start:
+            conflicts.append(booking)
+    return conflicts
+
+
+def is_availability_error(exc: CalApiError) -> bool:
+    text = str(exc.payload or exc).lower()
+    return "already has booking" in text or "not available" in text or "conflict" in text
+
+
+def suggest_slots(bookings: list, requested_start: datetime, duration_minutes: int, timezone: str) -> list[tuple[datetime, datetime]]:
+    local_start = ensure_aware(requested_start, timezone)
+    day_end = datetime.combine(local_start.date(), time(17, 0), local_start.tzinfo)
+    cursor = max(local_start + timedelta(minutes=duration_minutes), datetime.combine(local_start.date(), time(9, 0), local_start.tzinfo))
+    if cursor.minute not in {0, 30}:
+        cursor += timedelta(minutes=30 - (cursor.minute % 30))
+        cursor = cursor.replace(second=0, microsecond=0)
+    suggestions = []
+    while len(suggestions) < 3 and cursor + timedelta(minutes=duration_minutes) <= day_end:
+        slot_end = cursor + timedelta(minutes=duration_minutes)
+        if not overlapping_bookings(bookings, cursor, slot_end, timezone):
+            suggestions.append((cursor, slot_end))
+        cursor += timedelta(minutes=30)
+    return suggestions
+
+
+def format_time_range(start: datetime, end: datetime, timezone: str) -> str:
+    local_start = ensure_aware(start, timezone)
+    local_end = ensure_aware(end, timezone)
+    return f"{local_start:%Y-%m-%d %I:%M %p} - {local_end:%I:%M %p} {local_start.tzname()}"
+
+
+def format_conflict_reply(
+    requested_start: datetime,
+    requested_end: datetime,
+    conflicts: list,
+    suggestions: list[tuple[datetime, datetime]],
+    timezone: str,
+) -> str:
+    lines = [f"I could not book {format_time_range(requested_start, requested_end, timezone)} because it conflicts with:"]
+    for booking in conflicts:
+        booking_start = ensure_aware(booking.start, timezone)
+        booking_end = ensure_aware(booking.end, timezone) if booking.end else booking_start + timedelta(minutes=booking.duration or 30)
+        attendee = booking.attendee_name or booking.attendee_email or "unknown attendee"
+        title = booking.title or "Booking"
+        lines.append(f"- {format_time_range(booking_start, booking_end, timezone)}: {title} with {attendee}")
+    if suggestions:
+        lines.append("Suggested available times:")
+        for start, end in suggestions:
+            lines.append(f"- {format_time_range(start, end, timezone)}")
+    else:
+        lines.append("I could not find another open slot later that day.")
+    return "\n".join(lines)
+
+
+def format_unavailable_reply(
+    requested_start: datetime,
+    requested_end: datetime,
+    suggestions: list[tuple[datetime, datetime]],
+    timezone: str,
+) -> str:
+    lines = [
+        f"I could not book {format_time_range(requested_start, requested_end, timezone)} because Cal.com says that time is unavailable."
+    ]
+    if suggestions:
+        lines.append("Suggested available times based on your current bookings:")
+        for start, end in suggestions:
+            lines.append(f"- {format_time_range(start, end, timezone)}")
+    else:
+        lines.append("I could not find another open slot later that day based on current bookings.")
+    return "\n".join(lines)
 
 
 def format_booking_list(bookings: list) -> str:

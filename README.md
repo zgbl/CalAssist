@@ -158,6 +158,36 @@ For OpenRouter mode, it should be:
 {"extractor": "openrouter"}
 ```
 
+## Conflict Handling and Follow-up Memory
+
+The assistant never silently double-books. `CAL_ALLOW_CONFLICTS=false` is the default, so Cal.com remains the source of truth for real calendar conflicts.
+
+When Cal.com rejects a booking because the requested time is unavailable or conflicts with an existing booking, the assistant handles it as a scheduling clarification rather than a generic backend failure:
+
+1. It checks upcoming bookings visible through the Cal.com API.
+2. It finds bookings that overlap the requested time range.
+3. If a conflict is found, it reports the conflicting time range, title, and attendee.
+4. It suggests later open slots on the same day based on currently visible bookings.
+5. It stores the original booking request as a pending action.
+
+That pending action is important for conversational UX. If the user chooses one of the suggested slots in the next message, the assistant keeps the original context, including attendee, guest emails, subject, and duration, then retries the booking at the selected time.
+
+Example:
+
+```text
+User: Schedule me a meeting with Trump dtrump@example.com and rubio@example.com for Jun 16 11:15AM to discuss the North Korea problem
+Assistant: I could not book 2026-06-16 11:15 AM - 11:45 AM EDT because it conflicts with:
+- 2026-06-16 11:00 AM - 11:30 AM EDT: 30 min meeting between Xinyu Tu and Trump with Trump
+Suggested available times:
+- 2026-06-16 12:00 PM - 12:30 PM EDT
+- 2026-06-16 12:30 PM - 01:00 PM EDT
+- 2026-06-16 01:00 PM - 01:30 PM EDT
+User: Take this one: 2026-06-16 12:30 PM - 01:00 PM EDT
+Assistant: Booked 30 min meeting between Xinyu Tu and Trump for 2026-06-16 16:30:00+00:00. Booking UID: <cal_uid>
+```
+
+The second user message does not need to repeat Trump, Rubio, the subject, or the duration.
+
 ## Run
 
 ```bash
@@ -288,13 +318,14 @@ The example above uses `mock_1` to illustrate local mock mode. In real Cal.com m
 - The web UI is minimal but usable.
 - This submission assumes one configured Cal.com event type.
 - Bookings are still subject to Cal.com event type rules. The app defaults `CAL_ALLOW_BOOKING_OUT_OF_BOUNDS=true` so owner-created meetings can be placed outside public booking hours, but `CAL_ALLOW_CONFLICTS=false` keeps calendar conflict checks enabled.
+- Conflict suggestions are based on upcoming Cal.com bookings already visible to the API. This is sufficient to explain concrete conflicts with existing bookings; a production version should use Cal.com's slots/availability API for richer availability suggestions.
 - It does not implement OAuth because a personal API key is sufficient for this challenge.
 - It stores only short in-memory conversation history and pending actions; it does not persist chat sessions across restarts.
 - Slot lookup is not required for the main flow, but would be a natural next step before confirming a proposed time.
 
 ## Future Improvements
 
-- Add Cal.com slot lookup before booking to suggest valid times.
+- Use Cal.com's slots/availability API for richer suggestions before booking, instead of only deriving suggestions from visible upcoming bookings.
 - Add persistent chat sessions.
 - Add OAuth for multi-user deployment.
 - Add stronger LLM schema enforcement and prompt versioning.

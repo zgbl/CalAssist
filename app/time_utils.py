@@ -63,6 +63,12 @@ def day_bounds(day: datetime, tz_name: str) -> tuple[datetime, datetime]:
 def parse_day(text: str, now: datetime, tz_name: str) -> datetime | None:
     lowered = text.lower()
     local_now = ensure_aware(now, tz_name)
+    iso_match = re.search(r"\b(\d{4})-(\d{1,2})-(\d{1,2})\b", lowered)
+    if iso_match:
+        year = int(iso_match.group(1))
+        month = int(iso_match.group(2))
+        day = int(iso_match.group(3))
+        return local_now.replace(year=year, month=month, day=day)
     month_match = re.search(
         r"\b("
         + "|".join(MONTHS.keys())
