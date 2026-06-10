@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>CalAssist</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <aside class="sidebar">
+        <div class="brand">
+          <div class="brand-mark">C</div>
+          <div>
+            <h1>CalAssist</h1>
+            <p>Conversational scheduling for Cal.com</p>
+          </div>
+        </div>
+
+        <section class="status-panel">
+          <div class="panel-title">
+            <span>Runtime</span>
+            <button id="refresh-status" type="button">Refresh</button>
+          </div>
+          <div class="status-grid">
+            <div>
+              <span class="label">Cal.com</span>
+              <strong id="cal-status">Checking</strong>
+            </div>
+            <div>
+              <span class="label">Booking target</span>
+              <strong id="target-status">Checking</strong>
+            </div>
+            <div>
+              <span class="label">Extractor</span>
+              <strong id="llm-status">Checking</strong>
+            </div>
+          </div>
+        </section>
+
+        <section class="examples">
+          <div class="panel-title">
+            <span>Try</span>
+          </div>
+          <button type="button" data-example="what is on my calendar tomorrow?">List tomorrow</button>
+          <button type="button" data-example="book a 30-min intro with Alex alex@example.com tomorrow at 2pm">Book intro</button>
+          <button type="button" data-example="move <booking_uid> to tomorrow at 4pm">Reschedule</button>
+          <button type="button" data-example="cancel <booking_uid>">Cancel</button>
+        </section>
+      </aside>
+
+      <section class="chat-card">
+        <header class="chat-header">
+          <div>
+            <h2>Assistant</h2>
+            <p>Ask in plain English. Responses show whether OpenAI handled extraction.</p>
+          </div>
+          <span id="connection-pill" class="pill">Ready</span>
+        </header>
+
+        <div id="messages" class="messages" aria-live="polite"></div>
+
+        <form id="chat-form" class="composer">
+          <textarea
+            id="message"
+            rows="3"
+            autocomplete="off"
+            placeholder="Book a 30-min intro with Alex tomorrow at 2pm..."
+          ></textarea>
+          <button id="send" type="submit">Send</button>
+        </form>
+      </section>
+    </main>
+    <script src="/static/app.js"></script>
+  </body>
+</html>
