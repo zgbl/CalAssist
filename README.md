@@ -100,6 +100,15 @@ Most Cal.com event types have a fixed length. For those, do not send `lengthInMi
 CAL_SEND_LENGTH_IN_MINUTES=true
 ```
 
+Cal.com validates bookings against the event type's public availability. For example, a brand-new account may have no conflicts but still reject a Saturday booking if the event type only accepts weekday bookings. Because this assistant acts on behalf of the calendar owner, the app defaults to allowing bookings outside public event-type availability:
+
+```bash
+CAL_ALLOW_BOOKING_OUT_OF_BOUNDS=true
+CAL_ALLOW_CONFLICTS=false
+```
+
+`CAL_ALLOW_BOOKING_OUT_OF_BOUNDS=true` allows owner-created meetings on weekends or outside the public booking window. `CAL_ALLOW_CONFLICTS=false` keeps real calendar conflict protection enabled by default.
+
 If `CAL_API_KEY` is missing, the app uses `MockCalClient` so the UI and tests still work. In mock mode, an event type is not required. With real Cal.com credentials, configure an event type before booking.
 
 `.env` is ignored by Git and should not be committed.
@@ -214,6 +223,21 @@ curl -s -X POST http://127.0.0.1:8000/chat \
 
 If the user does not specify a duration, the assistant defaults to 30 minutes and confirms that default in the reply. If the user does not specify a subject, the assistant defaults to `Meeting: <host> and <attendee>` and confirms that default.
 
+For multiple attendees, the first email is sent as Cal.com's primary `attendee.email`, and additional emails are sent through Cal.com's `guests` field:
+
+```text
+Setup a new meeting Jun 16 11AM with Trump (dtrump@example.com) and Rubio (rubio@example.com)
+```
+
+This becomes:
+
+```json
+{
+  "attendee": {"email": "dtrump@example.com"},
+  "guests": ["rubio@example.com"]
+}
+```
+
 Cancel a booking:
 
 ```bash
@@ -263,6 +287,7 @@ The example above uses `mock_1` to illustrate local mock mode. In real Cal.com m
 - The real conversational path requires an OpenAI-compatible LLM. The rule-based extractor is intentionally simple and exists only for deterministic tests.
 - The web UI is minimal but usable.
 - This submission assumes one configured Cal.com event type.
+- Bookings are still subject to Cal.com event type rules. The app defaults `CAL_ALLOW_BOOKING_OUT_OF_BOUNDS=true` so owner-created meetings can be placed outside public booking hours, but `CAL_ALLOW_CONFLICTS=false` keeps calendar conflict checks enabled.
 - It does not implement OAuth because a personal API key is sufficient for this challenge.
 - It stores only short in-memory conversation history and pending actions; it does not persist chat sessions across restarts.
 - Slot lookup is not required for the main flow, but would be a natural next step before confirming a proposed time.

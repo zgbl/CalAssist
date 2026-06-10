@@ -82,6 +82,56 @@ def test_cancel_booking() -> None:
     assert cancelled.booking.status == "cancelled"
 
 
+def test_cancel_can_resolve_booking_by_day_and_attendee_name() -> None:
+    assistant = make_assistant()
+    booked = assistant.handle(
+        ChatRequest(
+            message="Book a 30-min intro with Alex alex@example.com tomorrow at 2pm",
+            timezone=TZ,
+            now=NOW,
+        )
+    )
+    assert booked.booking is not None
+    cancelled = assistant.handle(ChatRequest(message="取消我明天和 Alex 的会", timezone=TZ, now=NOW))
+    assert cancelled.status == "ok"
+    assert cancelled.action == "cancel"
+    assert cancelled.booking is not None
+    assert cancelled.booking.uid == booked.booking.uid
+    assert cancelled.booking.status == "cancelled"
+
+
+def test_cancel_by_details_says_not_found_when_no_booking_matches() -> None:
+    assistant = make_assistant()
+    response = assistant.handle(ChatRequest(message="取消我明天和 Alex 的会", timezone=TZ, now=NOW))
+    assert response.status == "needs_clarification"
+    assert response.action == "cancel"
+    assert response.missing_fields == ["booking_not_found"]
+    assert "could not find" in response.reply
+
+
+def test_cancel_by_details_asks_uid_only_when_multiple_bookings_match() -> None:
+    assistant = make_assistant()
+    assistant.handle(
+        ChatRequest(
+            message="Book a 30-min intro with Alex alex@example.com tomorrow at 2pm",
+            timezone=TZ,
+            now=NOW,
+        )
+    )
+    assistant.handle(
+        ChatRequest(
+            message="Book a 30-min intro with Alex alex@example.com tomorrow at 4pm",
+            timezone=TZ,
+            now=NOW,
+        )
+    )
+    response = assistant.handle(ChatRequest(message="取消我明天和 Alex 的会", timezone=TZ, now=NOW))
+    assert response.status == "needs_clarification"
+    assert response.action == "cancel"
+    assert response.missing_fields == ["booking_match_many"]
+    assert "multiple matching" in response.reply
+
+
 def test_reschedule_booking() -> None:
     assistant = make_assistant()
     booked = assistant.handle(
@@ -99,6 +149,121 @@ def test_reschedule_booking() -> None:
     assert response.booking is not None
     assert response.booking.start is not None
     assert response.booking.start.hour == 16
+
+
+def test_reschedule_can_resolve_booking_by_original_time() -> None:
+    assistant = make_assistant()
+    booked = assistant.handle(
+        ChatRequest(
+            message="Book a 30-min intro with Alex alex@example.com tomorrow at 10am",
+            timezone=TZ,
+            now=NOW,
+        )
+    )
+    assert booked.booking is not None
+    response = assistant.handle(
+        ChatRequest(
+            message="reschedule my meeting tomorrow 10AM to June 12 3PM EDT",
+            timezone=TZ,
+            now=NOW,
+        )
+    )
+    assert response.status == "ok"
+    assert response.action == "reschedule"
+    assert response.booking is not None
+    assert response.booking.uid == booked.booking.uid
+    assert response.booking.start is not None
+    assert response.booking.start.day == 12
+    assert response.booking.start.hour == 15
+
+
+def test_reschedule_to_clause_overrides_llm_old_start_confusion() -> None:
+    class OldStartExtractor:
+        name = "openrouter"
+
+        def extract(
+            self,
+            message: str,
+            now: datetime,
+            timezone: str,
+            history: list[dict[str, str]] | None = None,
+        ) -> AssistantAction:
+            return AssistantAction(
+                intent=Intent.RESCHEDULE,
+                start=datetime(2026, 6, 11, 10, 0, tzinfo=ZoneInfo(TZ)),
+            )
+
+    cal = MockCalClient()
+    assistant = SchedulingAssistant(
+        cal,
+        OldStartExtractor(),
+        Settings(cal_default_timezone=TZ, cal_event_type_id=123),
+    )
+    booked = assistant.handle(
+        ChatRequest(
+            message="Book a 30-min intro with Alex alex@example.com tomorrow at 10am",
+            timezone=TZ,
+            now=NOW,
+        )
+    )
+    assert booked.booking is not None
+    response = assistant.handle(
+        ChatRequest(
+            message="reschedule my meeting tomorrow 10AM to June 12 3PM EDT",
+            timezone=TZ,
+            now=NOW,
+        )
+    )
+    assert response.status == "ok"
+    assert response.booking is not None
+    assert response.booking.start is not None
+    assert response.booking.start.day == 12
+    assert response.booking.start.hour == 15
+
+
+def test_reschedule_without_matching_time_gives_specific_guidance() -> None:
+    assistant = make_assistant()
+    response = assistant.handle(
+        ChatRequest(
+            message="reschedule my meeting tomorrow 10AM to June 12 3PM EDT",
+            timezone=TZ,
+            now=NOW,
+        )
+    )
+    assert response.status == "needs_clarification"
+    assert response.action == "reschedule"
+    assert response.missing_fields == ["booking_match"]
+    assert "could not find a unique upcoming booking" in response.reply
+
+
+def test_reschedule_ignores_irrelevant_missing_fields_from_llm() -> None:
+    class ConfusedRescheduleExtractor:
+        name = "openrouter"
+
+        def extract(
+            self,
+            message: str,
+            now: datetime,
+            timezone: str,
+            history: list[dict[str, str]] | None = None,
+        ) -> AssistantAction:
+            return AssistantAction(intent=Intent.CLARIFY, missing_fields=["attendee_email", "unknown"])
+
+    assistant = SchedulingAssistant(
+        MockCalClient(),
+        ConfusedRescheduleExtractor(),
+        Settings(cal_default_timezone=TZ, cal_event_type_id=123),
+    )
+    response = assistant.handle(
+        ChatRequest(
+            message="reschedule my meeting tomorrow 10AM to June 12 3PM EDT",
+            timezone=TZ,
+            now=NOW,
+        )
+    )
+    assert response.action == "reschedule"
+    assert response.reply != "I need a little more information."
+    assert "attendee_email" not in response.missing_fields
 
 
 def test_clarify_intent_is_repaired_for_incomplete_booking() -> None:
@@ -150,13 +315,54 @@ def test_clarify_intent_is_repaired_for_incomplete_booking() -> None:
     assert second.status == "ok"
     assert second.action == "book"
     assert second.booking is not None
-    assert second.booking.attendee_email == "HTom@livex.ai"
+    assert second.booking.attendee_email == "htom@livex.ai"
     assert extractor.histories[0] == []
     assert extractor.histories[1]
     assert any(
         item["role"] == "assistant" and "missing=attendee_email" in item["content"]
         for item in extractor.histories[1]
     )
+
+
+def test_book_repairs_invalid_multi_email_extraction() -> None:
+    class BadEmailExtractor:
+        name = "openrouter"
+
+        def extract(
+            self,
+            message: str,
+            now: datetime,
+            timezone: str,
+            history: list[dict[str, str]] | None = None,
+        ) -> AssistantAction:
+            return AssistantAction(
+                intent=Intent.BOOK,
+                title="Discuss how to stop iron war",
+                start=datetime(2026, 6, 20, 11, 0, tzinfo=ZoneInfo(TZ)),
+                attendee_name="Trump",
+                attendee_email="dtrump@whitehouse.com and Rubio@whitehouse.com",
+            )
+
+    assistant = SchedulingAssistant(
+        MockCalClient(),
+        BadEmailExtractor(),
+        Settings(cal_default_timezone=TZ, cal_event_type_id=123),
+    )
+    response = assistant.handle(
+        ChatRequest(
+            message=(
+                "etup a new meeting for me Jun 20 11AM with Trump "
+                "(dtrump@whitehouse.com) and Rubio( Rubio@whitehouse.com)"
+            ),
+            timezone=TZ,
+            now=NOW,
+        )
+    )
+    assert response.status == "ok"
+    assert response.action == "book"
+    assert response.booking is not None
+    assert response.booking.attendee_email == "dtrump@whitehouse.com"
+    assert response.booking.raw["guests"] == ["rubio@whitehouse.com"]
 
 
 def test_complete_book_request_is_repaired_from_message_fields() -> None:
@@ -188,7 +394,7 @@ def test_complete_book_request_is_repaired_from_message_fields() -> None:
     assert response.action == "book"
     assert response.booking is not None
     assert response.booking.attendee_name == "Tom Hanks"
-    assert response.booking.attendee_email == "HTom@livex.ai"
+    assert response.booking.attendee_email == "htom@livex.ai"
     assert response.booking.start is not None
     assert response.booking.start.hour == 10
 

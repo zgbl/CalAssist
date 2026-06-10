@@ -1,13 +1,14 @@
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from app.cal_client import CalGateway
 from app.config import Settings
-from app.llm import ActionExtractor, extract_email, extract_name, extract_title
+from app.llm import ActionExtractor, extract_email, extract_emails, extract_name, extract_title, is_valid_email
 from app.models import AssistantAction, CalApiError, ChatRequest, ChatResponse, Intent, LlmExtractionError, PendingAction
-from app.time_utils import parse_duration, parse_start
+from app.time_utils import day_bounds, ensure_aware, parse_day, parse_duration, parse_reschedule_times, parse_start
 
 
 class ChatMemory:
@@ -60,6 +61,7 @@ class SchedulingAssistant:
         pending = self.memory.get(request.conversation_id)
         if pending:
             action = merge_pending(pending.action, action, request.message)
+        action = self._prepare_action(action, request.message, now, timezone)
 
         missing = self._missing_fields(action)
         if missing:
@@ -126,6 +128,7 @@ class SchedulingAssistant:
                 time_zone=timezone,
                 length_in_minutes=action.duration_minutes,
                 title=action.title,
+                guest_emails=action.guest_emails,
             )
             reply = f"Booked {booking.title or action.title or 'meeting'} for {booking.start}. Booking UID: {booking.uid}"
             confirmations = []
@@ -168,8 +171,77 @@ class SchedulingAssistant:
             )
         return ChatResponse(status="needs_clarification", reply="What would you like me to do?", conversation_id=conversation_id, extractor=extractor_name)
 
+    def _prepare_action(self, action: AssistantAction, message: str, now: datetime, timezone: str) -> AssistantAction:
+        if action.intent == Intent.CANCEL:
+            return self._prepare_cancel_action(action, message, now, timezone)
+        if action.intent != Intent.RESCHEDULE:
+            return action
+        allowed_missing = {"booking_uid", "start"}
+        if action.missing_fields:
+            action = action.model_copy(
+                update={"missing_fields": [field for field in action.missing_fields if field in allowed_missing]}
+            )
+        updates = {}
+        lookup_start, new_start = parse_reschedule_times(message, now, timezone)
+        if lookup_start and not action.lookup_start:
+            updates["lookup_start"] = lookup_start
+        if new_start:
+            updates["start"] = new_start
+        prepared = action.model_copy(update=updates) if updates else action
+        if not prepared.booking_uid and prepared.lookup_start:
+            prepared = self._resolve_booking_uid_by_start(prepared, timezone)
+        if prepared.booking_uid and prepared.missing_fields:
+            prepared = prepared.model_copy(
+                update={
+                    "missing_fields": [
+                        field for field in prepared.missing_fields if field != "booking_uid"
+                    ]
+                }
+            )
+        if not prepared.booking_uid and prepared.lookup_start and "booking_uid" in prepared.missing_fields:
+            prepared = prepared.model_copy(
+                update={
+                    "missing_fields": [
+                        "booking_match" if field == "booking_uid" else field
+                        for field in prepared.missing_fields
+                    ]
+                }
+            )
+        return prepared
+
+    def _prepare_cancel_action(self, action: AssistantAction, message: str, now: datetime, timezone: str) -> AssistantAction:
+        if action.booking_uid:
+            return action
+        missing = [field for field in action.missing_fields if field == "booking_uid"]
+        day = parse_day(message, now, timezone)
+        date_from = action.date_from
+        date_to = action.date_to
+        if day and not date_from and not date_to:
+            date_from, date_to = day_bounds(day, timezone)
+        candidate = self._resolve_booking_uid_by_details(
+            message=message,
+            timezone=timezone,
+            date_from=date_from,
+            date_to=date_to,
+        )
+        status, booking_uid = candidate
+        if status == "one" and booking_uid:
+            return action.model_copy(
+                update={
+                    "booking_uid": booking_uid,
+                    "date_from": date_from,
+                    "date_to": date_to,
+                    "missing_fields": [],
+                }
+            )
+        if status == "none":
+            missing = ["booking_not_found"]
+        elif status == "many":
+            missing = ["booking_match_many"]
+        return action.model_copy(update={"date_from": date_from, "date_to": date_to, "missing_fields": missing})
+
     def _missing_fields(self, action: AssistantAction) -> list[str]:
-        missing = list(action.missing_fields)
+        missing = normalize_missing_fields(action.intent, action.missing_fields)
         if action.intent == Intent.BOOK:
             if self.settings.has_cal_credentials and not self.settings.has_booking_target:
                 missing.append("cal_event_type")
@@ -180,13 +252,62 @@ class SchedulingAssistant:
             if not action.attendee_email:
                 missing.append("attendee_email")
         if action.intent == Intent.CANCEL and not action.booking_uid:
-            missing.append("booking_uid")
+            if not any(field in missing for field in ["booking_not_found", "booking_match_many"]):
+                missing.append("booking_uid")
         if action.intent == Intent.RESCHEDULE:
-            if not action.booking_uid:
+            if not action.booking_uid and "booking_match" not in missing:
                 missing.append("booking_uid")
             if not action.start:
                 missing.append("start")
         return sorted(set(missing))
+
+    def _resolve_booking_uid_by_start(self, action: AssistantAction, timezone: str) -> AssistantAction:
+        assert action.lookup_start is not None
+        target = ensure_aware(action.lookup_start, timezone)
+        matches = []
+        for booking in self.cal.list_bookings(status="upcoming"):
+            if booking.start and abs((ensure_aware(booking.start, timezone) - target).total_seconds()) < 60:
+                matches.append(booking)
+        if len(matches) == 1:
+            return action.model_copy(update={"booking_uid": matches[0].uid})
+        return action
+
+    def _resolve_booking_uid_by_details(
+        self,
+        *,
+        message: str,
+        timezone: str,
+        date_from: datetime | None,
+        date_to: datetime | None,
+    ) -> tuple[str, str | None]:
+        lowered = message.lower()
+        name_tokens = [
+            token
+            for token in re.findall(r"[A-Za-z][A-Za-z.'-]{1,}", lowered)
+            if token not in {"cancel", "delete", "remove", "meeting", "tomorrow", "today", "with", "my"}
+        ]
+        matches = []
+        for booking in self.cal.list_bookings(status="upcoming"):
+            if date_from and date_to:
+                if not booking.start:
+                    continue
+                start = ensure_aware(booking.start, timezone)
+                if not (date_from <= start < date_to):
+                    continue
+            searchable = " ".join(
+                value
+                for value in [booking.title, booking.attendee_name, booking.attendee_email]
+                if value
+            ).lower()
+            name_matches = any(token and token in searchable for token in name_tokens)
+            if (name_tokens and name_matches) or (not name_tokens and date_from and date_to):
+                matches.append(booking)
+        if len(matches) == 1:
+            return "one", matches[0].uid
+        if len(matches) > 1:
+            return "many", None
+        return "none", None
+
 
 
 def merge_pending(pending: AssistantAction, new: AssistantAction, message: str) -> AssistantAction:
@@ -225,11 +346,11 @@ def repair_action_from_message(message: str, action: AssistantAction, now: datet
 
     # User intent verbs win over model confusion. Booking creates the UID; users
     # should never be asked for a booking UID when they are trying to create.
-    if any(word in lowered for word in ["book", "schedule", "set up"]):
+    if re.search(r"\b(book|schedule|etup)\b", lowered) or "set up" in lowered:
         repaired_intent = Intent.BOOK
-    elif any(word in lowered for word in ["cancel", "delete", "remove"]):
+    elif any(word in lowered for word in ["cancel", "delete", "remove"]) or "取消" in lowered:
         repaired_intent = Intent.CANCEL
-    elif any(word in lowered for word in ["reschedule", "move", "push", "change"]):
+    elif any(word in lowered for word in ["reschedule", "eschedule", "move", "push", "change"]):
         repaired_intent = Intent.RESCHEDULE
     elif action.intent != Intent.CLARIFY:
         return action
@@ -261,6 +382,30 @@ def repair_action_from_message(message: str, action: AssistantAction, now: datet
 
     if repaired.intent == Intent.BOOK:
         return repair_booking_fields(message, repaired, now, timezone)
+    if repaired.intent == Intent.CANCEL:
+        day = parse_day(message, now, timezone)
+        updates = {}
+        if day and not repaired.date_from and not repaired.date_to:
+            date_from, date_to = day_bounds(day, timezone)
+            updates["date_from"] = date_from
+            updates["date_to"] = date_to
+        if action.missing_fields:
+            updates["missing_fields"] = [
+                field for field in repaired.missing_fields if field == "booking_uid"
+            ]
+        return repaired.model_copy(update=updates) if updates else repaired
+    if repaired.intent == Intent.RESCHEDULE:
+        lookup_start, new_start = parse_reschedule_times(message, now, timezone)
+        updates = {}
+        if lookup_start and not repaired.lookup_start:
+            updates["lookup_start"] = lookup_start
+        if new_start:
+            updates["start"] = new_start
+        if action.missing_fields:
+            updates["missing_fields"] = [
+                field for field in repaired.missing_fields if field not in {"attendee_email", "attendee_name"}
+            ]
+        return repaired.model_copy(update=updates) if updates else repaired
     return repaired
 
 
@@ -275,10 +420,11 @@ def repair_booking_fields(message: str, action: AssistantAction, now: datetime, 
         updates["duration_minutes"] = parsed_duration
         if parsed_duration == 30:
             updates["defaulted_duration"] = True
-    if not action.attendee_email:
-        parsed_email = extract_email(message)
-        if parsed_email:
-            updates["attendee_email"] = parsed_email
+    parsed_emails = extract_emails(message)
+    if parsed_emails and (not action.attendee_email or not is_valid_email(str(action.attendee_email))):
+        updates["attendee_email"] = parsed_emails[0]
+    if len(parsed_emails) > 1:
+        updates["guest_emails"] = parsed_emails[1:]
     if not action.attendee_name:
         parsed_name = extract_name(message)
         if parsed_name:
@@ -313,7 +459,24 @@ def clarification_for(missing: list[str]) -> str:
         return "What is the attendee's name?"
     if "booking_uid" in missing:
         return "Which booking UID should I use?"
+    if "booking_not_found" in missing:
+        return "I could not find a matching upcoming booking to cancel."
+    if "booking_match_many" in missing:
+        return "I found multiple matching upcoming bookings. Please specify which booking UID to cancel."
+    if "booking_match" in missing:
+        return "I could not find a unique upcoming booking at that original time. Please include the booking UID or list your bookings first."
     return "I need a little more information."
+
+
+def normalize_missing_fields(intent: Intent, missing_fields: list[str]) -> list[str]:
+    allowed = {
+        Intent.BOOK: {"cal_event_type", "start", "attendee_name", "attendee_email"},
+        Intent.CANCEL: {"booking_uid", "booking_not_found", "booking_match_many"},
+        Intent.RESCHEDULE: {"booking_uid", "booking_match", "start"},
+        Intent.LIST: set(),
+        Intent.CLARIFY: set(missing_fields),
+    }
+    return [field for field in missing_fields if field in allowed[intent]]
 
 
 def format_booking_list(bookings: list) -> str:

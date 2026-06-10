@@ -54,7 +54,9 @@ class AssistantAction(BaseModel):
     duration_minutes: int | None = 30
     attendee_name: str | None = None
     attendee_email: str | None = None
+    guest_emails: list[str] = Field(default_factory=list)
     booking_uid: str | None = None
+    lookup_start: datetime | None = None
     reason: str | None = None
     date_from: datetime | None = None
     date_to: datetime | None = None
@@ -62,7 +64,7 @@ class AssistantAction(BaseModel):
     defaulted_duration: bool = False
     defaulted_title: bool = False
 
-    @field_validator("start", "date_from", "date_to")
+    @field_validator("start", "lookup_start", "date_from", "date_to")
     @classmethod
     def require_tz(cls, value: datetime | None) -> datetime | None:
         if value is not None and (value.tzinfo is None or value.utcoffset() is None):

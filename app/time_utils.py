@@ -15,6 +15,33 @@ WEEKDAYS = {
     "sunday": 6,
 }
 
+MONTHS = {
+    "jan": 1,
+    "january": 1,
+    "feb": 2,
+    "february": 2,
+    "mar": 3,
+    "march": 3,
+    "apr": 4,
+    "april": 4,
+    "may": 5,
+    "jun": 6,
+    "june": 6,
+    "jul": 7,
+    "july": 7,
+    "aug": 8,
+    "august": 8,
+    "sep": 9,
+    "sept": 9,
+    "september": 9,
+    "oct": 10,
+    "october": 10,
+    "nov": 11,
+    "november": 11,
+    "dec": 12,
+    "december": 12,
+}
+
 
 def ensure_aware(value: datetime, tz_name: str) -> datetime:
     tz = ZoneInfo(tz_name)
@@ -36,9 +63,20 @@ def day_bounds(day: datetime, tz_name: str) -> tuple[datetime, datetime]:
 def parse_day(text: str, now: datetime, tz_name: str) -> datetime | None:
     lowered = text.lower()
     local_now = ensure_aware(now, tz_name)
-    if "today" in lowered or "later today" in lowered:
+    month_match = re.search(
+        r"\b("
+        + "|".join(MONTHS.keys())
+        + r")\s+(\d{1,2})(?:st|nd|rd|th)?(?:,\s*(\d{4}))?\b",
+        lowered,
+    )
+    if month_match:
+        month = MONTHS[month_match.group(1)]
+        day = int(month_match.group(2))
+        year = int(month_match.group(3) or local_now.year)
+        return local_now.replace(year=year, month=month, day=day)
+    if "today" in lowered or "later today" in lowered or "今天" in lowered:
         return local_now
-    if "tomorrow" in lowered:
+    if "tomorrow" in lowered or "明天" in lowered:
         return local_now + timedelta(days=1)
     for name, weekday in WEEKDAYS.items():
         if name in lowered:
@@ -82,6 +120,19 @@ def parse_start(text: str, now: datetime, tz_name: str) -> datetime | None:
     return day.replace(hour=hour, minute=minute, second=0, microsecond=0)
 
 
+def parse_reschedule_times(text: str, now: datetime, tz_name: str) -> tuple[datetime | None, datetime | None]:
+    lowered = text.lower()
+    if " to " not in lowered:
+        return None, parse_start(text, now, tz_name)
+
+    before, after = re.split(r"\s+to\s+", text, maxsplit=1, flags=re.IGNORECASE)
+    old_start = parse_start(before, now, tz_name)
+    new_start = parse_start(after, now, tz_name)
+    if old_start is None:
+        old_start = parse_start(text, now, tz_name)
+    return old_start, new_start
+
+
 def parse_duration(text: str) -> int:
     lowered = text.lower()
     total = 0
@@ -95,4 +146,3 @@ def parse_duration(text: str) -> int:
     elif compact_match:
         total += int(compact_match.group(1))
     return total or 30
-

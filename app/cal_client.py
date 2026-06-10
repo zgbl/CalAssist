@@ -8,6 +8,7 @@ import httpx
 from app.config import Settings
 from app.models import BookingSummary, CalApiError
 from app.time_utils import to_utc_z
+from app.llm import extract_emails
 
 
 class CalGateway(Protocol):
@@ -22,6 +23,7 @@ class CalGateway(Protocol):
         time_zone: str,
         length_in_minutes: int | None = None,
         title: str | None = None,
+        guest_emails: list[str] | None = None,
     ) -> BookingSummary: ...
     def cancel_booking(self, booking_uid: str, reason: str | None = None) -> BookingSummary: ...
     def reschedule_booking(self, booking_uid: str, start: datetime, reason: str | None = None) -> BookingSummary: ...
@@ -49,7 +51,9 @@ class CalClient:
         time_zone: str,
         length_in_minutes: int | None = None,
         title: str | None = None,
+        guest_emails: list[str] | None = None,
     ) -> BookingSummary:
+        attendee_email, guests = normalize_booking_emails(attendee_email, guest_emails)
         body: dict[str, Any] = {
             "start": to_utc_z(start),
             "attendee": {
@@ -59,6 +63,12 @@ class CalClient:
                 "language": "en",
             },
         }
+        if guests:
+            body["guests"] = guests
+        if self.settings.cal_allow_booking_out_of_bounds:
+            body["allowBookingOutOfBounds"] = True
+        if self.settings.cal_allow_conflicts:
+            body["allowConflicts"] = True
         if self.settings.cal_event_type_id:
             body["eventTypeId"] = self.settings.cal_event_type_id
         else:
@@ -142,6 +152,22 @@ def booking_from_cal(data: dict[str, Any]) -> BookingSummary:
     )
 
 
+def normalize_booking_emails(attendee_email: str, guest_emails: list[str] | None = None) -> tuple[str, list[str]]:
+    emails = []
+    for raw in [attendee_email, *(guest_emails or [])]:
+        emails.extend(extract_emails(raw))
+    normalized: list[str] = []
+    seen = set()
+    for email in emails:
+        clean = email.strip().lower()
+        if clean and clean not in seen:
+            normalized.append(clean)
+            seen.add(clean)
+    if not normalized:
+        raise CalApiError("A valid attendee email is required")
+    return normalized[0], normalized[1:]
+
+
 class MockCalClient:
     def __init__(self) -> None:
         self.bookings: dict[str, BookingSummary] = {}
@@ -164,7 +190,9 @@ class MockCalClient:
         time_zone: str,
         length_in_minutes: int | None = None,
         title: str | None = None,
+        guest_emails: list[str] | None = None,
     ) -> BookingSummary:
+        attendee_email, guests = normalize_booking_emails(attendee_email, guest_emails)
         uid = f"mock_{self.counter}"
         self.counter += 1
         booking = BookingSummary(
@@ -175,7 +203,7 @@ class MockCalClient:
             duration=length_in_minutes or 30,
             attendee_name=attendee_name,
             attendee_email=attendee_email,
-            raw={"timeZone": time_zone},
+            raw={"timeZone": time_zone, "guests": guests},
         )
         self.bookings[uid] = booking
         return booking

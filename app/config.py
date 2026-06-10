@@ -54,6 +54,8 @@ class Settings(BaseModel):
     cal_username: str | None = getenv("CAL_USERNAME") or None
     cal_organization_slug: str | None = getenv("CAL_ORGANIZATION_SLUG") or None
     cal_send_length_in_minutes: bool = getenv("CAL_SEND_LENGTH_IN_MINUTES", "").lower() in {"1", "true", "yes"}
+    cal_allow_booking_out_of_bounds: bool = getenv("CAL_ALLOW_BOOKING_OUT_OF_BOUNDS", "true").lower() in {"1", "true", "yes"}
+    cal_allow_conflicts: bool = getenv("CAL_ALLOW_CONFLICTS", "").lower() in {"1", "true", "yes"}
     llm_provider: str = _llm_provider()
     openai_api_key: str | None = _llm_api_key()
     openai_base_url: str = _llm_base_url()
