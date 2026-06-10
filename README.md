@@ -65,16 +65,17 @@ cp .env.example .env
 
 ## Configure Cal.com
 
-Edit `.env`:
+Create a `.env` file:
 
 ```bash
-CAL_API_KEY=cal_your_key_here
+CAL_API_KEY="Your CAL.com API KEY"
 CAL_DEFAULT_TIMEZONE=America/New_York
-CAL_DEFAULT_ATTENDEE_NAME="Xinyu Tu"
+CAL_DEFAULT_ATTENDEE_NAME="YOUR NAME"
 CAL_DEFAULT_ATTENDEE_EMAIL="your@email.com"
-LLM_PROVIDER=openai
-OPENAI_API_KEY=your_openai_key
-OPENAI_MODEL=gpt-4o-mini
+LLM_PROVIDER=openrouter
+OPENROUTER_API_KEY="Your Openrouter Key"
+OPENROUTER_MODELS=nvidia/nemotron-3-super-120b-a12b:free
+
 ```
 
 Configure the booking target using one of these options.
