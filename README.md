@@ -12,6 +12,8 @@ The user can manage their Cal.com bookings through plain English:
 
 The app is written in Python with FastAPI. The real application path uses an OpenAI-compatible LLM for conversational understanding and the Cal.com REST API for calendar operations. Tests can run with mocked Cal.com calls and a rule-based extractor so they are deterministic and do not require external services.
 
+The app also includes a lightweight browser UI served by FastAPI. After running the server, open `http://127.0.0.1:8000` in a browser to test the chatbot interactively. The API endpoints are available from the same host and port.
+
 ## Architecture
 
 ```text
@@ -181,10 +183,20 @@ The second user message does not need to repeat Trump, Rubio, the subject, or th
 uvicorn app.main:app --reload
 ```
 
-Open:
+The same FastAPI server serves both the backend API and the browser UI.
+
+Open the interactive chatbot UI in a browser:
 
 ```text
 http://127.0.0.1:8000
+```
+
+Use the same base URL for API testing:
+
+```text
+http://127.0.0.1:8000/chat
+http://127.0.0.1:8000/health
+http://127.0.0.1:8000/api/bookings
 ```
 
 API docs:
