@@ -20,7 +20,7 @@ Web UI / curl
   -> SchedulingAssistant
   -> ActionExtractor
        - OpenAI-compatible JSON extraction for the real app
-       - rule_based extractor only for tests/local fallback
+       - rule_based extractor only for deterministic tests
   -> CalGateway
        - MockCalClient without credentials
        - CalClient with Cal.com API key
@@ -31,7 +31,7 @@ Important design choices:
 
 - The conversational layer extracts a structured action.
 - Cal.com API calls are isolated in `app/cal_client.py`.
-- The assistant keeps short-lived pending actions when it needs missing details.
+- The assistant keeps short-lived pending actions and recent conversation history when it needs missing details.
 - Tests use `MockCalClient`, mocked HTTP calls, and deterministic extraction, so they do not need real API keys.
 - Real Cal.com credentials are read from environment variables and are never committed.
 
@@ -74,7 +74,7 @@ CAL_DEFAULT_ATTENDEE_NAME="YOUR NAME"
 CAL_DEFAULT_ATTENDEE_EMAIL="your@email.com"
 LLM_PROVIDER=openrouter
 OPENROUTER_API_KEY="Your Openrouter Key"
-OPENROUTER_MODELS=nvidia/nemotron-3-super-120b-a12b:free
+OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
 
 ```
 
@@ -134,6 +134,8 @@ OPENROUTER_MODEL=nvidia/nemotron-3-super-120b-a12b:free
 The LLM is responsible for understanding the user's conversational request and extracting a structured scheduling action. Booking creation, cancellation, rescheduling, and API error handling remain deterministic backend logic.
 
 `LLM_PROVIDER=rule_based` exists only as a deterministic test mode. It is not the intended production or submission configuration. In `LLM_PROVIDER=openai` or `LLM_PROVIDER=openrouter` mode, LLM extraction failures return an error instead of silently falling back to rule-based parsing.
+
+The assistant also keeps a short in-memory conversation history per `conversation_id`, so follow-up messages like an attendee email can complete a booking request from the previous turn.
 
 Successful chat responses include an `extractor` field. For the submitted configuration, it should be:
 
@@ -210,6 +212,8 @@ curl -s -X POST http://127.0.0.1:8000/chat \
   }'
 ```
 
+If the user does not specify a duration, the assistant defaults to 30 minutes and confirms that default in the reply. If the user does not specify a subject, the assistant defaults to `Meeting: <host> and <attendee>` and confirms that default.
+
 Cancel a booking:
 
 ```bash
@@ -240,13 +244,14 @@ In real Cal.com mode, use an actual booking UID returned by Cal.com. `mock_1` on
 ## Example Conversation
 
 ```text
-User: Book a 30-min intro with Alex tomorrow at 2pm
+User: Book a meeting with Alex tomorrow at 2pm
 Assistant: What is the attendee's email address?
 User: alex@example.com
-Assistant: Booked Intro call for 2026-06-11 14:00:00-04:00. Booking UID: mock_1
+Assistant: Booked Meeting: Xinyu Tu and Alex for 2026-06-11 14:00:00-04:00. Booking UID: mock_1
+Confirmed: defaulted duration to 30 minutes; defaulted subject to 'Meeting: Xinyu Tu and Alex'.
 User: what's on my calendar tomorrow?
 Assistant: Upcoming bookings:
-- mock_1: Intro call at 2026-06-11 14:00:00-04:00 (accepted)
+- mock_1: Meeting: Xinyu Tu and Alex at 2026-06-11 14:00:00-04:00 (accepted)
 User: move mock_1 to tomorrow at 4pm
 Assistant: Rescheduled booking mock_1 to 2026-06-11 16:00:00-04:00.
 ```
@@ -259,7 +264,7 @@ The example above uses `mock_1` to illustrate local mock mode. In real Cal.com m
 - The web UI is minimal but usable.
 - This submission assumes one configured Cal.com event type.
 - It does not implement OAuth because a personal API key is sufficient for this challenge.
-- It does not store conversation history beyond in-memory pending actions.
+- It stores only short in-memory conversation history and pending actions; it does not persist chat sessions across restarts.
 - Slot lookup is not required for the main flow, but would be a natural next step before confirming a proposed time.
 
 ## Future Improvements
